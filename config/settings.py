@@ -144,6 +144,10 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '1.0.0',
 }
 
+# Dollars charged per fuel stop when planning the fewer_stops option. It stands
+# in for the driver's time and detour; the cheapest plan ignores it.
+FUEL_STOP_PENALTY_USD = float(os.environ.get("FUEL_STOP_PENALTY_USD", "5"))
+
 # Route responses are cached so a repeated trip does not call OSRM again.
 CACHES = {
     'default': {

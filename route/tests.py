@@ -1,3 +1,5 @@
+import math
+import random
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -56,6 +58,91 @@ class FuelPlanTests(TestCase):
     def test_gap_over_500_miles_is_rejected(self):
         with self.assertRaises(FuelPlanError):
             plan_fuel([{"mile": 600, "price": 3}], 800)
+
+    def test_gap_is_rejected_with_a_stop_charge_too(self):
+        with self.assertRaises(FuelPlanError):
+            plan_fuel([{"mile": 400, "price": 3}, {"mile": 950, "price": 3}], 1200, stop_penalty=5)
+
+    def test_matches_an_exhaustive_search(self):
+        rng = random.Random(1)
+        for _ in range(200):
+            dest = rng.randint(501, 2000)
+            stations = _random_stations(rng, dest)
+            best = _exhaustive_cost(stations, dest)
+            if best is None:
+                with self.assertRaises(FuelPlanError):
+                    plan_fuel(stations, dest)
+                continue
+            _stops, cost = plan_fuel(stations, dest)
+            self.assertAlmostEqual(cost, best, places=6)
+
+    def test_case_the_old_greedy_overpaid(self):
+        # The previous planner paid $329.76 here.
+        stations = [
+            {"mile": mile, "price": price}
+            for mile, price in [
+                (158, 4.13), (207, 3.15), (219, 3.71), (290, 4.48), (307, 4.4),
+                (316, 3.01), (355, 3.94), (368, 3.74), (602, 4.12), (626, 3.31),
+                (655, 3.15), (672, 4.03), (1027, 3.73), (1043, 4.2), (1054, 4.27),
+                (1233, 3.22), (1363, 3.86), (1453, 2.88),
+            ]
+        ]
+        _stops, cost = plan_fuel(stations, 1511)
+        self.assertAlmostEqual(cost, 318.539, places=3)
+
+    def test_stop_charge_trades_a_little_money_for_fewer_stops(self):
+        stations = [
+            {"mile": 200, "price": 3.4},
+            {"mile": 500, "price": 3.3},
+            {"mile": 550, "price": 3.2},
+        ]
+        cheap_stops, cheap_cost = plan_fuel(stations, 800)
+        few_stops, few_cost = plan_fuel(stations, 800, stop_penalty=5)
+        self.assertEqual([stop["mile"] for stop in cheap_stops], [500, 550])
+        self.assertAlmostEqual(cheap_cost, 96.5)
+        self.assertEqual([stop["mile"] for stop in few_stops], [500])
+        self.assertAlmostEqual(few_stops[0]["gallons"], 30)
+        self.assertAlmostEqual(few_cost, 99.0)
+
+    def test_stop_charge_never_adds_stops_or_saves_money(self):
+        rng = random.Random(2)
+        for _ in range(200):
+            dest = rng.randint(501, 2000)
+            stations = _random_stations(rng, dest)
+            try:
+                cheap_stops, cheap_cost = plan_fuel(stations, dest)
+            except FuelPlanError:
+                continue
+            few_stops, few_cost = plan_fuel(stations, dest, stop_penalty=5)
+            self.assertLessEqual(len(few_stops), len(cheap_stops))
+            self.assertGreaterEqual(few_cost, cheap_cost - 1e-6)
+
+
+def _random_stations(rng, dest):
+    miles = rng.sample(range(1, dest), rng.randint(3, 20))
+    return [{"mile": mile, "price": round(rng.uniform(2.8, 4.5), 2)} for mile in miles]
+
+
+def _exhaustive_cost(stations, dest, tank=500, mpg=10):
+    """Cheapest cost by trying every fuel level at every station, one mile of fuel at a time."""
+    best = {tank: 0.0}
+    pos = 0
+    for station in sorted(stations, key=lambda s: s["mile"]) + [{"mile": dest, "price": None}]:
+        leg = station["mile"] - pos
+        arrived = {}
+        for fuel, cost in best.items():
+            if fuel >= leg:
+                arrived[fuel - leg] = min(arrived.get(fuel - leg, math.inf), cost)
+        if not arrived:
+            return None
+        if station["price"] is not None:
+            levels = [arrived.get(fuel, math.inf) for fuel in range(tank + 1)]
+            for fuel in range(1, tank + 1):
+                levels[fuel] = min(levels[fuel], levels[fuel - 1] + station["price"] / mpg)
+            arrived = {fuel: cost for fuel, cost in enumerate(levels) if cost < math.inf}
+        best = arrived
+        pos = station["mile"]
+    return min(best.values())
 
 
 class CityMatchTests(TestCase):
@@ -147,6 +234,41 @@ class RouteApiTests(TestCase):
         self.assertEqual(body["route"]["type"], "LineString")
         self.assertEqual(second.json()["total_fuel_cost_usd"], body["total_fuel_cost_usd"])
         self.assertEqual(get.call_count, 1)
+        self.assertEqual(body["plan"], "cheapest")
+        self.assertEqual(set(body["plans"]), {"cheapest", "fewer_stops"})
+        self.assertEqual(body["fuel_stops"], body["plans"]["cheapest"]["fuel_stops"])
+        self.assertIn("plan=cheapest", body["map_url"])
+        self.assertTrue(body["plan_comparison"])
+
+    @patch("route.services.routing.requests.get")
+    def test_fewer_stops_plan_reuses_the_same_route_call(self, get):
+        miles = haversine(40, -104, 40, -89)
+        get.return_value.json.return_value = self._osrm(miles, -104, 40, -89, 40)
+        get.return_value.raise_for_status.return_value = None
+        trip = {"start": "Chicago, IL", "finish": "Dallas, TX"}
+
+        self.client.get("/api/route/", trip)
+        response = self.client.get("/api/route/", {**trip, "plan": "fewer_stops"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["plan"], "fewer_stops")
+        self.assertEqual(body["fuel_stops"], body["plans"]["fewer_stops"]["fuel_stops"])
+        self.assertEqual(
+            body["total_fuel_cost_usd"],
+            body["plans"]["fewer_stops"]["total_fuel_cost_usd"],
+        )
+        self.assertIn("plan=fewer_stops", body["map_url"])
+        self.assertEqual(get.call_count, 1)
+
+    @patch("route.services.routing.requests.get")
+    def test_unknown_plan_is_rejected_before_routing(self, get):
+        response = self.client.get(
+            "/api/route/",
+            {"start": "Chicago, IL", "finish": "Dallas, TX", "plan": "fastest"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("plan", response.json()["error"])
+        get.assert_not_called()
 
     @patch("route.services.routing.requests.get")
     def test_short_trip_costs_nothing(self, get):
@@ -180,3 +302,13 @@ class RouteApiTests(TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Fuel route")
+        self.assertContains(response, 'data-plan="fewer_stops"')
+        self.assertContains(response, 'data-initial="cheapest"')
+
+    def test_map_page_opens_on_the_linked_plan(self):
+        response = self.client.get("/", {"plan": "fewer_stops"})
+        self.assertContains(response, 'data-initial="fewer_stops"')
+
+    def test_map_page_ignores_an_unknown_plan(self):
+        response = self.client.get("/", {"plan": "<script>"})
+        self.assertContains(response, 'data-initial="cheapest"')

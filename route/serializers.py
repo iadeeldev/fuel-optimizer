@@ -22,6 +22,19 @@ class FuelStopSerializer(serializers.Serializer):
     lng = serializers.FloatField()
 
 
+class PlanOptionSerializer(serializers.Serializer):
+    fuel_stops = FuelStopSerializer(many=True)
+    stop_count = serializers.IntegerField()
+    total_fuel_cost_usd = serializers.FloatField()
+    purchased_fuel_gallons = serializers.FloatField()
+    stop_penalty_usd = serializers.FloatField(help_text="Dollars charged per stop while planning. 0 for cheapest.")
+
+
+class PlansSerializer(serializers.Serializer):
+    cheapest = PlanOptionSerializer(help_text="Lowest fuel bill.")
+    fewer_stops = PlanOptionSerializer(help_text="Slightly higher bill, far fewer stops.")
+
+
 class RouteGeometrySerializer(serializers.Serializer):
     type = serializers.CharField()
     coordinates = serializers.ListField(child=serializers.ListField(child=serializers.FloatField()))
@@ -40,7 +53,13 @@ class RoutePlanSerializer(serializers.Serializer):
     starting_tank_gallons = serializers.FloatField()
     purchased_fuel_gallons = serializers.FloatField()
     map_url = serializers.URLField(help_text="Open this link in a browser to see the route on a map with the fuel stops.")
+    plan = serializers.ChoiceField(
+        choices=["cheapest", "fewer_stops"],
+        help_text="The plan whose stops and cost fill fuel_stops and total_fuel_cost_usd.",
+    )
     fuel_stops = FuelStopSerializer(many=True)
+    plans = PlansSerializer()
+    plan_comparison = serializers.CharField()
     route = RouteGeometrySerializer()
     notes = serializers.CharField()
 

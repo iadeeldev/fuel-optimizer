@@ -8,7 +8,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .serializers import ErrorSerializer, RoutePlanSerializer
-from .services.planner import PlanError, build_plan
+from .services.planner import DEFAULT_PLAN, PLAN_NAMES, PlanError, build_plan
 
 
 @extend_schema(
@@ -33,6 +33,19 @@ from .services.planner import PlanError, build_plan
             required=True,
             description="Finish place. A US city, with or without a state. Example: Dallas, TX",
         ),
+        OpenApiParameter(
+            name="plan",
+            type=str,
+            location=OpenApiParameter.QUERY,
+            required=False,
+            enum=list(PLAN_NAMES),
+            default=DEFAULT_PLAN,
+            description=(
+                "Which plan fills fuel_stops and total_fuel_cost_usd. cheapest is the "
+                "lowest fuel bill; fewer_stops stops far less for a slightly higher bill. "
+                "Both plans are always returned under plans."
+            ),
+        ),
     ],
     responses={
         200: RoutePlanSerializer,
@@ -49,10 +62,16 @@ def route_plan(request):
             {"error": "Pass start and finish as US cities, for example Chicago, IL."},
             status=400,
         )
+    choice = request.query_params.get("plan", DEFAULT_PLAN)
+    if choice not in PLAN_NAMES:
+        return Response(
+            {"error": "plan must be cheapest or fewer_stops."},
+            status=400,
+        )
     try:
-        plan = build_plan(start, finish)
+        plan = build_plan(start, finish, choice)
         map_url = request.build_absolute_uri(reverse("map")) + "?" + urlencode(
-            {"start": start.strip(), "finish": finish.strip()}
+            {"start": start.strip(), "finish": finish.strip(), "plan": choice}
         )
         return Response({**plan, "map_url": map_url})
     except PlanError as exc:
@@ -61,11 +80,13 @@ def route_plan(request):
 
 @require_GET
 def map_page(request):
+    choice = request.GET.get("plan", DEFAULT_PLAN)
     return render(
         request,
         "route/map.html",
         {
             "start": request.GET.get("start", "Chicago, IL"),
             "finish": request.GET.get("finish", "Dallas, TX"),
+            "plan": choice if choice in PLAN_NAMES else DEFAULT_PLAN,
         },
     )

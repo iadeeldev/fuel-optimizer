@@ -69,6 +69,31 @@
       font-size: 12px;
       padding: 5px 8px;
     }
+    .plans {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 0 22px 14px;
+    }
+    .plans[hidden] { display: none; }
+    .plan-option {
+      font: inherit;
+      cursor: pointer;
+      text-align: left;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      color: var(--ink);
+      padding: 9px 11px;
+    }
+    .plan-option strong { display: block; font-size: 14px; }
+    .plan-option span { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .plan-option[aria-checked="true"] {
+      border-color: var(--green);
+      box-shadow: inset 0 0 0 1px var(--green);
+      background: #eef6f2;
+    }
+    .compare { color: var(--muted); font-size: 12px; margin: -6px 0 14px; }
     #summary {
       overflow: auto;
       padding: 8px 22px 24px;
@@ -128,6 +153,14 @@
         <button class="chip" type="button" data-start="Seattle, WA" data-finish="Miami, FL">Seattle to Miami</button>
         <button class="chip" type="button" data-start="New York, NY" data-finish="Los Angeles, CA">New York to Los Angeles</button>
       </div>
+      <div class="plans" id="plans" role="radiogroup" aria-label="Fuel plan" data-initial="{{ plan }}" hidden>
+        <button class="plan-option" type="button" role="radio" aria-checked="false" data-plan="cheapest">
+          <strong>Cheapest</strong><span data-detail>Lowest fuel bill</span>
+        </button>
+        <button class="plan-option" type="button" role="radio" aria-checked="false" data-plan="fewer_stops">
+          <strong>Fewer stops</strong><span data-detail>Far fewer stops</span>
+        </button>
+      </div>
       <div id="summary"><p class="sub">Plan a trip to see stops and cost.</p></div>
     </aside>
     <div id="map"></div>
@@ -141,8 +174,12 @@
       attribution: "&copy; OpenStreetMap contributors"
     }).addTo(map);
     const drawn = L.layerGroup().addTo(map);
+    const stopLayer = L.layerGroup().addTo(map);
     const form = document.getElementById("trip");
     const summary = document.getElementById("summary");
+    const planPicker = document.getElementById("plans");
+    let trip = null;
+    let selected = planPicker.dataset.initial || "cheapest";
 
     function dollars(value) {
       return "$" + Number(value).toFixed(2);
@@ -151,7 +188,12 @@
       return "$" + Number(value).toFixed(3);
     }
 
+    function stopWord(count) {
+      return count + " stop" + (count === 1 ? "" : "s");
+    }
+
     function render(data) {
+      trip = data;
       drawn.clearLayers();
       const line = L.geoJSON(data.route, {
         style: { color: "#0f6e56", weight: 5, opacity: 0.9 }
@@ -162,25 +204,47 @@
       L.circleMarker([data.finish.lat, data.finish.lng], {
         radius: 7, color: "#0f6e56", fillColor: "#0f6e56", fillOpacity: 1
       }).addTo(drawn).bindTooltip("Finish: " + data.finish.label);
-      data.fuel_stops.forEach((stop, index) => {
+      if (line.getBounds().isValid()) {
+        map.fitBounds(line.getBounds(), { padding: [28, 28] });
+      }
+      planPicker.querySelectorAll("[data-plan]").forEach((button) => {
+        const option = data.plans[button.dataset.plan];
+        button.querySelector("[data-detail]").textContent =
+          dollars(option.total_fuel_cost_usd) + " · " + stopWord(option.stop_count);
+      });
+      planPicker.hidden = false;
+      showPlan(selected);
+    }
+
+    // Switching plans redraws only the stops; the route and both plans are already loaded.
+    function showPlan(name) {
+      selected = name;
+      planPicker.querySelectorAll("[data-plan]").forEach((button) => {
+        button.setAttribute("aria-checked", String(button.dataset.plan === name));
+      });
+      const url = new URL(window.location.href);
+      url.searchParams.set("plan", name);
+      history.replaceState(null, "", url);
+
+      const data = trip;
+      const option = data.plans[name];
+      stopLayer.clearLayers();
+      option.fuel_stops.forEach((stop, index) => {
         const icon = L.divIcon({
           className: "",
           html: '<div class="stop-pin">' + (index + 1) + "</div>",
           iconSize: [22, 22],
           iconAnchor: [11, 11]
         });
-        L.marker([stop.lat, stop.lng], { icon }).addTo(drawn).bindPopup(
+        L.marker([stop.lat, stop.lng], { icon }).addTo(stopLayer).bindPopup(
           "<strong>" + stop.name + "</strong><br>" +
           stop.city + ", " + stop.state + "<br>" +
           perGallon(stop.price_per_gallon) + "/gal · " +
           stop.gallons + " gal · " + dollars(stop.cost_usd)
         );
       });
-      if (line.getBounds().isValid()) {
-        map.fitBounds(line.getBounds(), { padding: [28, 28] });
-      }
-      const stops = data.fuel_stops.length
-        ? "<ol>" + data.fuel_stops.map((stop) =>
+      const stops = option.fuel_stops.length
+        ? "<ol>" + option.fuel_stops.map((stop) =>
             "<li><strong>" + stop.city + ", " + stop.state + "</strong>" +
             "<span>" + stop.name + " · mile " + stop.mile_along_route +
             " · " + stop.gallons + " gal at " + perGallon(stop.price_per_gallon) +
@@ -188,23 +252,34 @@
           ).join("") + "</ol>"
         : "<p class=\"sub\">No fuel stop. A full tank covers this trip.</p>";
       summary.innerHTML =
-        '<div class="stat">' + dollars(data.total_fuel_cost_usd) + "</div>" +
+        '<div class="stat">' + dollars(option.total_fuel_cost_usd) + "</div>" +
         '<p class="sub">' + data.distance_miles + " miles · " +
         Math.round(data.duration_minutes) + " min · " +
-        data.fuel_stops.length + " stop" + (data.fuel_stops.length === 1 ? "" : "s") +
-        "</p>" + stops;
+        stopWord(option.stop_count) + "</p>" +
+        '<p class="compare"></p>' + stops;
+      summary.querySelector(".compare").textContent = data.plan_comparison;
+    }
+
+    function showError(message) {
+      drawn.clearLayers();
+      stopLayer.clearLayers();
+      planPicker.hidden = true;
+      const note = document.createElement("p");
+      note.className = "error";
+      // The message can echo what the user typed, so it is set as text, never HTML.
+      note.textContent = message || "Could not plan that route.";
+      summary.replaceChildren(note);
     }
 
     async function plan() {
       const start = form.start.value.trim();
       const finish = form.finish.value.trim();
       summary.innerHTML = '<p class="sub">Planning…</p>';
-      const params = new URLSearchParams({ start, finish });
+      const params = new URLSearchParams({ start, finish, plan: selected });
       const response = await fetch("/api/route/?" + params.toString());
       const data = await response.json();
       if (!response.ok) {
-        drawn.clearLayers();
-        summary.innerHTML = '<p class="error">' + (data.error || "Could not plan that route.") + "</p>";
+        showError(data.error);
         return;
       }
       const url = new URL(window.location.href);
@@ -214,6 +289,11 @@
       render(data);
     }
 
+    planPicker.querySelectorAll("[data-plan]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (trip) showPlan(button.dataset.plan);
+      });
+    });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       plan();

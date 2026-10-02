@@ -22,7 +22,18 @@ Open http://127.0.0.1:8000/ for the map.
 
 ```
 GET /api/route/?start=Chicago,%20IL&finish=Dallas,%20TX
+GET /api/route/?start=Chicago,%20IL&finish=Dallas,%20TX&plan=fewer_stops
 ```
+
+Every response carries two fuel plans under `plans`:
+
+- `cheapest` (default): the lowest fuel bill.
+- `fewer_stops`: counts `FUEL_STOP_PENALTY_USD` (default $5) per stop for driver
+  time, so it stops far less for a slightly higher bill.
+
+`plan` picks which one fills `fuel_stops` and `total_fuel_cost_usd`, and
+`plan_comparison` sums up the difference. Both come from the same single route
+call, so switching plans costs nothing. The map page has a toggle for the two.
 
 Swagger UI: http://127.0.0.1:8000/api/docs/ (OpenAPI file at `/api/schema/`,
 which Postman can import). The response includes `map_url`, a link that opens
