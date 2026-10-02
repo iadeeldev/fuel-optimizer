@@ -25,6 +25,14 @@ class RoutingError(Exception):
     pass
 
 
+class NoRouteError(RoutingError):
+    """The router answered, but no road connects the two places (Hawaii to the mainland, say)."""
+
+
+# OSRM codes meaning "no road between these points", sent with HTTP 400.
+NO_ROUTE_CODES = {"NoRoute", "NoSegment"}
+
+
 def driving_route(start, finish):
     """Return distance_miles, duration_minutes, and GeoJSON coordinates. One HTTP call."""
     key = (
@@ -48,8 +56,15 @@ def driving_route(start, finish):
             params={"overview": "full", "geometries": "geojson", "steps": "false"},
             timeout=25,
         )
-        response.raise_for_status()
         payload = response.json()
+    except requests.RequestException as exc:
+        raise RoutingError("The routing service did not respond. Try again.") from exc
+
+    # Read OSRM's own code before the HTTP status: "no road" comes back as a 400.
+    if payload.get("code") in NO_ROUTE_CODES:
+        raise NoRouteError("No driving route connects those places.")
+    try:
+        response.raise_for_status()
     except requests.RequestException as exc:
         raise RoutingError("The routing service did not respond. Try again.") from exc
 

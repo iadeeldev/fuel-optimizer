@@ -2,13 +2,21 @@ from urllib.parse import urlencode
 
 from django.shortcuts import render
 from django.urls import reverse
+from django.views.decorators.gzip import gzip_page
 from django.views.decorators.http import require_GET
 from drf_spectacular.utils import OpenApiParameter, extend_schema
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, throttle_classes
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
 
 from .serializers import ErrorSerializer, RoutePlanSerializer
 from .services.planner import DEFAULT_PLAN, PLAN_NAMES, PlanError, build_plan
+
+
+class RouteRateThrottle(AnonRateThrottle):
+    """Per-client limit, set by ROUTE_RATE_LIMIT, so no one client can exhaust the free OSRM server."""
+
+    scope = "route"
 
 
 @extend_schema(
@@ -50,10 +58,15 @@ from .services.planner import DEFAULT_PLAN, PLAN_NAMES, PlanError, build_plan
     responses={
         200: RoutePlanSerializer,
         400: ErrorSerializer,
+        429: None,
         502: ErrorSerializer,
     },
 )
+# Compressed here rather than site-wide: this reply holds no secrets, while
+# pages with CSRF tokens (the admin) should not be gzipped (BREACH).
+@gzip_page
 @api_view(["GET"])
+@throttle_classes([RouteRateThrottle])
 def route_plan(request):
     start = request.query_params.get("start", "")
     finish = request.query_params.get("finish", "")

@@ -31,7 +31,8 @@ def plan_fuel(stations, dest_miles, max_range=MAX_RANGE_MILES, mpg=MPG, stop_pen
     dest = round(dest_miles)
     points = _cheapest_per_mile(stations, dest_miles)
     choices, end_fuel = _search(points, dest, max_range, mpg, stop_penalty)
-    return _purchases(points, choices, end_fuel, dest, mpg)
+    plan = _chosen_stops(points, choices, end_fuel, dest)
+    return _size_purchases(plan, dest, dest_miles, max_range, mpg)
 
 
 def _cheapest_per_mile(stations, dest_miles):
@@ -94,28 +95,55 @@ def _buy(arrive, dollars_per_mile, penalty):
     return leave, came_from
 
 
-def _purchases(points, choices, end_fuel, dest, mpg):
-    """Trace the winning plan back from the finish."""
-    stops = []
+def _chosen_stops(points, choices, end_fuel, dest):
+    """Trace the winning plan back from the finish: (whole mile, station, fuel on leaving) per stop."""
+    plan = []
     fuel = end_fuel
     next_mile = dest
     for (mile, station), came_from in zip(reversed(points), reversed(choices)):
         leave = fuel + next_mile - mile
-        before = came_from[leave]
-        if leave > before:
-            gallons = (leave - before) / mpg
-            stops.append(
-                {
-                    "mile": station["mile"],
-                    "price": station["price"],
-                    "gallons": gallons,
-                    "cost": gallons * station["price"],
-                    "station": station,
-                }
-            )
-        fuel = before
+        if leave > came_from[leave]:
+            plan.append((mile, station, leave))
+        fuel = came_from[leave]
         next_mile = mile
-    stops.reverse()
+    plan.reverse()
+    return plan
+
+
+def _size_purchases(plan, dest, dest_miles, tank, mpg):
+    """
+    The search rounds stations to whole miles, which can leave the tank a fraction
+    of a mile short of a stop or over full. Replay the chosen stops on the true
+    miles instead: at each stop buy enough to reach the next one with the fuel the
+    search planned to arrive with, never past a full tank.
+    """
+    stops = []
+    fuel = float(tank)
+    here = 0.0
+    ahead = [(mile, station["mile"]) for mile, station, _leave in plan[1:]] + [(dest, dest_miles)]
+    for (mile, station, leave), (next_mile, next_true) in zip(plan, ahead):
+        fuel -= station["mile"] - here
+        here = station["mile"]
+        if fuel < -1e-9:
+            raise _gap_error(tank)
+        arrive_next = leave - (next_mile - mile)
+        target = min(arrive_next + next_true - here, float(tank))
+        need = target - fuel
+        if need <= 1e-9:
+            continue
+        fuel += need
+        gallons = need / mpg
+        stops.append(
+            {
+                "mile": here,
+                "price": station["price"],
+                "gallons": gallons,
+                "cost": gallons * station["price"],
+                "station": station,
+            }
+        )
+    if fuel - (dest_miles - here) < -1e-9:
+        raise _gap_error(tank)
     return stops, sum(stop["cost"] for stop in stops)
 
 

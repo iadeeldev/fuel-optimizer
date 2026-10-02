@@ -101,6 +101,7 @@
       flex: 1;
     }
     .stat { font-size: 28px; font-weight: 650; letter-spacing: -0.03em; margin: 8px 0 2px; }
+    .stat + .sub { margin-bottom: 4px; }
     .sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
     .error { color: #9f1239; font-size: 14px; line-height: 1.4; }
     ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
@@ -251,8 +252,12 @@
             " · " + dollars(stop.cost_usd) + "</span></li>"
           ).join("") + "</ol>"
         : "<p class=\"sub\">No fuel stop. A full tank covers this trip.</p>";
+      const tripCost = option.trip_fuel_cost_usd === null
+        ? ""
+        : " · " + dollars(option.trip_fuel_cost_usd) + " for the whole trip";
       summary.innerHTML =
         '<div class="stat">' + dollars(option.total_fuel_cost_usd) + "</div>" +
+        '<p class="sub">bought on the way' + tripCost + "</p>" +
         '<p class="sub">' + data.distance_miles + " miles · " +
         Math.round(data.duration_minutes) + " min · " +
         stopWord(option.stop_count) + "</p>" +

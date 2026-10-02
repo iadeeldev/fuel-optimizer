@@ -4,6 +4,9 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import requests
+
+from django.apps import apps
 from django.conf import settings
 from django.core.cache import cache
 from django.test import TestCase
@@ -19,7 +22,9 @@ from route.services.routing import (
     simplify_line,
     stations_along_route,
 )
+from route.services.planner import starting_tank_price, trip_fuel_cost
 from route.services.stations import clear_station_cache
+from route.views import RouteRateThrottle
 
 
 class FuelPlanTests(TestCase):
@@ -113,6 +118,24 @@ class FuelPlanTests(TestCase):
         self.assertAlmostEqual(few_stops[0]["gallons"], 30)
         self.assertAlmostEqual(few_cost, 99.0)
 
+    def test_tank_never_runs_dry_or_overfills_on_fractional_miles(self):
+        # Stations off whole miles are where rounding used to leave the tank short.
+        rng = random.Random(7)
+        for _ in range(300):
+            dest = rng.uniform(501, 2500)
+            stations = [
+                {"mile": rng.uniform(1, dest - 1), "price": round(rng.uniform(2.8, 4.5), 2)}
+                for _ in range(rng.randint(3, 25))
+            ]
+            for penalty in (0, 5):
+                try:
+                    stops, _cost = plan_fuel(stations, dest, stop_penalty=penalty)
+                except FuelPlanError:
+                    continue
+                lowest, fullest = _replay_tank(stops, dest)
+                self.assertGreaterEqual(lowest, -1e-6)
+                self.assertLessEqual(fullest, 500 + 1e-6)
+
     def test_stop_charge_never_adds_stops_or_saves_money(self):
         rng = random.Random(2)
         for _ in range(200):
@@ -125,6 +148,35 @@ class FuelPlanTests(TestCase):
             few_stops, few_cost = plan_fuel(stations, dest, stop_penalty=5)
             self.assertLessEqual(len(few_stops), len(cheap_stops))
             self.assertGreaterEqual(few_cost, cheap_cost - 1e-6)
+
+
+class TripCostTests(TestCase):
+    def test_starting_tank_is_priced_at_the_route_average(self):
+        self.assertAlmostEqual(starting_tank_price([{"price": 3.0}, {"price": 4.0}], []), 3.5)
+
+    def test_starting_tank_falls_back_to_every_station(self):
+        stations = [_station(1, 40, -99, "2.000"), _station(2, 41, -99, "4.000")]
+        self.assertAlmostEqual(starting_tank_price([], stations), 3.0)
+
+    def test_starting_tank_has_no_price_without_stations(self):
+        self.assertIsNone(starting_tank_price([], []))
+
+    def test_trip_cost_adds_the_starting_fuel_burned(self):
+        # 700 miles: 20 gallons bought for $64, the other 50 come from the tank.
+        self.assertEqual(trip_fuel_cost(64.0, 20, 70, 3.0), 214.0)
+
+    def test_short_trip_still_has_a_fuel_cost(self):
+        self.assertEqual(trip_fuel_cost(0.0, 0, 18, 3.0), 54.0)
+
+    def test_trip_cost_is_unknown_without_a_price(self):
+        self.assertIsNone(trip_fuel_cost(0.0, 0, 18, None))
+
+
+class StartupTests(TestCase):
+    def test_missing_city_list_does_not_stop_startup(self):
+        with patch("route.services.geo.city_index", side_effect=FileNotFoundError):
+            with self.assertLogs("route.apps", level="WARNING"):
+                apps.get_app_config("route").ready()
 
 
 class RouteGeometryTests(TestCase):
@@ -196,6 +248,19 @@ def _station(station_id, lat, lng, price="3.000"):
     return SimpleNamespace(id=station_id, latitude=lat, longitude=lng, price=Decimal(price))
 
 
+def _replay_tank(stops, dest, tank=500, mpg=10):
+    """Drive the plan on its true miles; return the lowest and fullest tank, in miles of range."""
+    fuel, pos = float(tank), 0.0
+    lowest, fullest = fuel, fuel
+    for stop in stops:
+        fuel -= stop["mile"] - pos
+        lowest = min(lowest, fuel)
+        fuel += stop["gallons"] * mpg
+        fullest = max(fullest, fuel)
+        pos = stop["mile"]
+    return min(lowest, fuel - (dest - pos)), fullest
+
+
 def _random_stations(rng, dest):
     miles = rng.sample(range(1, dest), rng.randint(3, 20))
     return [{"mile": mile, "price": round(rng.uniform(2.8, 4.5), 2)} for mile in miles]
@@ -257,6 +322,18 @@ class CityMatchTests(TestCase):
         with self.assertRaises(PlaceError):
             locate_label("Dallas")
 
+    def test_a_region_outside_the_usa_is_named_in_the_error(self):
+        for text, region in [("Toronto, ON", "'ON'"), ("Paris, France", "'France'")]:
+            with self.assertRaises(PlaceError) as caught:
+                locate_label(text)
+            self.assertIn(f"{region} is not a US state", str(caught.exception))
+
+    def test_country_zip_and_dotted_forms_are_understood(self):
+        self.assertEqual(locate_label("Austin, Texas, USA")["label"], "Austin, TX")
+        self.assertEqual(locate_label("Dallas, TX 75201")["label"], "Dallas, TX")
+        self.assertEqual(locate_label("Washington, D.C.")["label"], "Washington, DC")
+        self.assertEqual(locate_label("Chicago,")["label"], "Chicago, IL")
+
 
 class RouteApiTests(TestCase):
     @classmethod
@@ -317,6 +394,28 @@ class RouteApiTests(TestCase):
         self.assertEqual(body["fuel_stops"], body["plans"]["cheapest"]["fuel_stops"])
         self.assertIn("plan=cheapest", body["map_url"])
         self.assertTrue(body["plan_comparison"])
+        self.assertGreater(body["trip_fuel_cost_usd"], body["total_fuel_cost_usd"])
+
+    @patch("route.services.routing.requests.get")
+    def test_route_reply_is_gzipped_when_the_client_accepts_it(self, get):
+        miles = haversine(40, -104, 40, -89)
+        get.return_value.json.return_value = self._osrm(miles, -104, 40, -89, 40)
+        get.return_value.raise_for_status.return_value = None
+        response = self.client.get(
+            "/api/route/",
+            {"start": "Chicago, IL", "finish": "Dallas, TX"},
+            HTTP_ACCEPT_ENCODING="gzip",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Encoding"], "gzip")
+
+    def test_a_client_over_the_rate_limit_is_turned_away(self):
+        with patch.object(RouteRateThrottle, "get_rate", return_value="2/minute"):
+            codes = [
+                self.client.get("/api/route/", {"start": "Chicago, IL"}).status_code
+                for _ in range(3)
+            ]
+        self.assertEqual(codes, [400, 400, 429])
 
     @patch("route.services.routing.requests.get")
     def test_fewer_stops_plan_reuses_the_same_route_call(self, get):
@@ -360,6 +459,9 @@ class RouteApiTests(TestCase):
         body = response.json()
         self.assertEqual(body["total_fuel_cost_usd"], 0)
         self.assertEqual(body["fuel_stops"], [])
+        # 180 miles burns 18 gallons from the tank, priced at the only station's $3.
+        self.assertEqual(body["starting_tank_price_per_gallon"], 3.0)
+        self.assertEqual(body["trip_fuel_cost_usd"], 54.0)
 
     @patch("route.services.routing.requests.get")
     def test_unreachable_stretch_is_an_error(self, get):
@@ -371,6 +473,27 @@ class RouteApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("500", response.json()["error"])
+
+    @patch("route.services.routing.requests.get")
+    def test_places_with_no_road_between_them_are_a_400(self, get):
+        get.return_value.json.return_value = {"code": "NoRoute", "message": "Impossible route between points"}
+        get.return_value.raise_for_status.side_effect = requests.HTTPError("400 Client Error")
+        response = self.client.get(
+            "/api/route/",
+            {"start": "Honolulu, HI", "finish": "Dallas, TX"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("No driving route", response.json()["error"])
+
+    @patch("route.services.routing.requests.get")
+    def test_router_outage_is_a_502(self, get):
+        get.side_effect = requests.ConnectionError("down")
+        response = self.client.get(
+            "/api/route/",
+            {"start": "Chicago, IL", "finish": "Dallas, TX"},
+        )
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("did not respond", response.json()["error"])
 
     def test_missing_place_does_not_need_the_router(self):
         response = self.client.get("/api/route/", {"start": "Chicago, IL"})

@@ -7,8 +7,15 @@ from django.core.cache import cache
 
 from .fuel import FuelPlanError, MPG, MAX_RANGE_MILES, plan_fuel
 from .geo import PlaceError, locate_label
-from .routing import CORRIDOR_MILES, RoutingError, driving_route, simplify_line, stations_along_route
-from .stations import station_index
+from .routing import (
+    CORRIDOR_MILES,
+    NoRouteError,
+    RoutingError,
+    driving_route,
+    simplify_line,
+    stations_along_route,
+)
+from .stations import all_stations, station_index
 
 PLAN_NAMES = ("cheapest", "fewer_stops")
 DEFAULT_PLAN = "cheapest"
@@ -29,13 +36,14 @@ def build_plan(start_text, finish_text, plan=DEFAULT_PLAN):
         "plan": plan,
         "fuel_stops": chosen["fuel_stops"],
         "total_fuel_cost_usd": chosen["total_fuel_cost_usd"],
+        "trip_fuel_cost_usd": chosen["trip_fuel_cost_usd"],
         "purchased_fuel_gallons": chosen["purchased_fuel_gallons"],
     }
 
 
 def _trip(start_text, finish_text):
     """Everything that does not depend on the chosen plan. Cached, so switching plans is free."""
-    cache_key = f"plan:v5:{_norm(start_text)}|{_norm(finish_text)}"
+    cache_key = f"plan:v6:{_norm(start_text)}|{_norm(finish_text)}"
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -48,6 +56,8 @@ def _trip(start_text, finish_text):
 
     try:
         route = driving_route(start, finish)
+    except NoRouteError as exc:
+        raise PlanError(str(exc), status=400) from exc
     except RoutingError as exc:
         raise PlanError(str(exc), status=502) from exc
 
@@ -57,8 +67,9 @@ def _trip(start_text, finish_text):
         route["distance_miles"],
     )
     penalties = {"cheapest": 0.0, "fewer_stops": settings.FUEL_STOP_PENALTY_USD}
+    tank_price = starting_tank_price(nearby, all_stations())
     plans = {
-        name: _plan_option(nearby, route["distance_miles"], penalty)
+        name: _plan_option(nearby, route["distance_miles"], penalty, tank_price)
         for name, penalty in penalties.items()
     }
     payload = {
@@ -71,14 +82,17 @@ def _trip(start_text, finish_text):
         "max_range_miles": MAX_RANGE_MILES,
         "trip_fuel_gallons": round(route["distance_miles"] / MPG, 1),
         "starting_tank_gallons": round(MAX_RANGE_MILES / MPG, 1),
+        "starting_tank_price_per_gallon": None if tank_price is None else round(tank_price, 3),
         "plans": plans,
         "plan_comparison": _comparison(plans["cheapest"], plans["fewer_stops"]),
         # Matching used the full line; the browser only needs its visible shape.
         "route": {"type": "LineString", "coordinates": simplify_line(route["coordinates"])},
         "notes": (
-            "The vehicle starts with a full tank (50 gallons), so that first tank "
-            "is not billed and a trip under 500 miles costs nothing. "
-            "total_fuel_cost_usd covers only fuel bought at the stops. "
+            "The vehicle starts with a full tank (50 gallons). total_fuel_cost_usd is "
+            "the money spent at the stops, so a trip under 500 miles spends nothing. "
+            "trip_fuel_cost_usd is the cost of all fuel the trip burns: the stops plus "
+            "the starting fuel used, valued at starting_tank_price_per_gallon, the "
+            "average price of the stations along the route. "
             "cheapest is the lowest fuel bill; fewer_stops adds "
             f"${settings.FUEL_STOP_PENALTY_USD:.2f} per stop for driver time, so it stops far less "
             "for a slightly higher bill. Station positions are the city of each truck stop, "
@@ -90,19 +104,42 @@ def _trip(start_text, finish_text):
     return payload
 
 
-def _plan_option(nearby, distance_miles, penalty):
+def _plan_option(nearby, distance_miles, penalty, tank_price):
     try:
         stops, _total = plan_fuel(nearby, distance_miles, stop_penalty=penalty)
     except FuelPlanError as exc:
         raise PlanError(str(exc), status=400) from exc
     fuel_stops = [_stop_payload(stop) for stop in stops]
+    spent = round(sum(stop["cost_usd"] for stop in fuel_stops), 2)
+    bought = sum(stop["gallons"] for stop in fuel_stops)
     return {
         "fuel_stops": fuel_stops,
         "stop_count": len(fuel_stops),
-        "total_fuel_cost_usd": round(sum(stop["cost_usd"] for stop in fuel_stops), 2),
-        "purchased_fuel_gallons": round(sum(stop["gallons"] for stop in fuel_stops), 2),
+        "total_fuel_cost_usd": spent,
+        "trip_fuel_cost_usd": trip_fuel_cost(spent, bought, distance_miles / MPG, tank_price),
+        "purchased_fuel_gallons": round(bought, 2),
         "stop_penalty_usd": penalty,
     }
+
+
+def starting_tank_price(nearby, stations):
+    """
+    Dollars per gallon used to value the fuel the vehicle starts with: the
+    average price along the route, or across every station when none is near it.
+    None when there are no stations at all.
+    """
+    prices = [item["price"] for item in nearby] or [float(station.price) for station in stations]
+    if not prices:
+        return None
+    return sum(prices) / len(prices)
+
+
+def trip_fuel_cost(spent, bought_gallons, trip_gallons, tank_price):
+    """Money spent at stops plus the starting fuel the trip burns, at tank_price."""
+    if tank_price is None:
+        return None
+    from_tank = min(max(trip_gallons - bought_gallons, 0.0), MAX_RANGE_MILES / MPG)
+    return round(spent + from_tank * tank_price, 2)
 
 
 def _comparison(cheapest, fewer):

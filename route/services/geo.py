@@ -75,8 +75,17 @@ def in_usa(lat, lng):
     return conus or alaska or hawaii
 
 
+# A trailing country ("Austin, TX, USA") or ZIP code ("Dallas, TX 75201") says
+# nothing the state does not, so both are dropped before parsing.
+COUNTRY_SUFFIX = re.compile(
+    r"(?:,\s*|\s+)(?:usa|u\.s\.a\.?|us|u\.s\.?|united states(?: of america)?)\s*$",
+    re.IGNORECASE,
+)
+ZIP_SUFFIX = re.compile(r"\s+\d{5}(?:-\d{4})?\s*$")
+
+
 def normalize_state(value):
-    token = value.strip().lower().rstrip(".")
+    token = value.strip().lower().replace(".", "")
     if len(token) == 2 and token.upper() in US_STATES:
         return token.upper()
     return STATE_NAMES.get(token)
@@ -93,15 +102,23 @@ def parse_place(text):
     )
     if coords:
         return ("coords", float(coords.group(1)), float(coords.group(2)))
+    raw = COUNTRY_SUFFIX.sub("", raw).strip()
     if "," in raw:
         city, region = raw.rsplit(",", 1)
+        region = ZIP_SUFFIX.sub("", region).strip()
         state = normalize_state(region)
         city = city.strip()
-        if state and city:
+        if not city:
+            raise PlaceError(f"Could not read location '{text.strip()}'. Use City, ST.")
+        if state:
             return ("city", city, state)
-        if city:
-            return ("name", city, None)
-        raise PlaceError(f"Could not read location '{raw}'. Use City, ST.")
+        if region:
+            # "Toronto, ON" or "Paris, France": say so rather than suggest a US namesake.
+            raise PlaceError(
+                f"'{region}' is not a US state. Both places must be in the USA, "
+                "written as City, ST, for example Dallas, TX."
+            )
+        return ("name", city, None)
     parts = raw.split()
     if len(parts) >= 2 and normalize_state(parts[-1]):
         return ("city", " ".join(parts[:-1]), normalize_state(parts[-1]))

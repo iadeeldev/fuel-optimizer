@@ -132,6 +132,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Per-client limit on the route endpoint. The free OSRM server asks for
+    # about one request a second, and cached trips do not call it at all.
+    'DEFAULT_THROTTLE_RATES': {
+        'route': os.environ.get("ROUTE_RATE_LIMIT", "30/minute"),
+    },
 }
 
 SPECTACULAR_SETTINGS = {
@@ -148,12 +153,15 @@ SPECTACULAR_SETTINGS = {
 # in for the driver's time and detour; the cheapest plan ignores it.
 FUEL_STOP_PENALTY_USD = float(os.environ.get("FUEL_STOP_PENALTY_USD", "5"))
 
-# Route responses are cached so a repeated trip does not call OSRM again.
+# Route responses are cached so a repeated trip does not call OSRM again. The
+# database cache is shared by every server process and survives restarts.
+# Create its table once with: python manage.py createcachetable
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'fuel-routes',
-        'TIMEOUT': 60 * 60,
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'route_cache',
+        'TIMEOUT': 60 * 60 * 24,
+        'OPTIONS': {'MAX_ENTRIES': 2000},
     }
 }
 

@@ -25,7 +25,11 @@ class FuelStopSerializer(serializers.Serializer):
 class PlanOptionSerializer(serializers.Serializer):
     fuel_stops = FuelStopSerializer(many=True)
     stop_count = serializers.IntegerField()
-    total_fuel_cost_usd = serializers.FloatField()
+    total_fuel_cost_usd = serializers.FloatField(help_text="Money spent at the fuel stops.")
+    trip_fuel_cost_usd = serializers.FloatField(
+        allow_null=True,
+        help_text="Cost of all fuel the trip burns, including the starting tank.",
+    )
     purchased_fuel_gallons = serializers.FloatField()
     stop_penalty_usd = serializers.FloatField(help_text="Dollars charged per stop while planning. 0 for cheapest.")
 
@@ -45,12 +49,20 @@ class RoutePlanSerializer(serializers.Serializer):
     finish = PlaceSerializer()
     distance_miles = serializers.FloatField()
     duration_minutes = serializers.FloatField()
-    total_fuel_cost_usd = serializers.FloatField()
+    total_fuel_cost_usd = serializers.FloatField(help_text="Money spent at the fuel stops of the chosen plan.")
+    trip_fuel_cost_usd = serializers.FloatField(
+        allow_null=True,
+        help_text="Cost of all fuel the trip burns, including the starting tank, for the chosen plan.",
+    )
     assumes_full_tank_at_start = serializers.BooleanField()
     mpg = serializers.IntegerField()
     max_range_miles = serializers.IntegerField()
     trip_fuel_gallons = serializers.FloatField()
     starting_tank_gallons = serializers.FloatField()
+    starting_tank_price_per_gallon = serializers.FloatField(
+        allow_null=True,
+        help_text="Price used to value the starting tank: the average along the route.",
+    )
     purchased_fuel_gallons = serializers.FloatField()
     map_url = serializers.URLField(help_text="Open this link in a browser to see the route on a map with the fuel stops.")
     plan = serializers.ChoiceField(
