@@ -1,8 +1,10 @@
-"""In-memory station list so a request does not re-read the PDF."""
+"""In-memory station list and its location index, so a request does not re-read the database."""
 
 from ..models import FuelStation
+from .routing import StationIndex
 
 _stations = None
+_index = None
 
 
 def all_stations():
@@ -12,6 +14,14 @@ def all_stations():
     return _stations
 
 
+def station_index():
+    global _index
+    if _index is None:
+        _index = StationIndex(all_stations())
+    return _index
+
+
 def clear_station_cache():
-    global _stations
+    global _stations, _index
     _stations = None
+    _index = None

@@ -1,6 +1,7 @@
 import math
 import random
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.conf import settings
@@ -10,6 +11,14 @@ from django.test import TestCase
 from route.models import FuelStation
 from route.services.fuel import FuelPlanError, plan_fuel
 from route.services.geo import CityIndex, PlaceError, haversine, locate_label, repair_state
+from route.services.routing import (
+    CORRIDOR_MILES,
+    MILES_PER_DEGREE,
+    StationIndex,
+    _resample,
+    simplify_line,
+    stations_along_route,
+)
 from route.services.stations import clear_station_cache
 
 
@@ -116,6 +125,75 @@ class FuelPlanTests(TestCase):
             few_stops, few_cost = plan_fuel(stations, dest, stop_penalty=5)
             self.assertLessEqual(len(few_stops), len(cheap_stops))
             self.assertGreaterEqual(few_cost, cheap_cost - 1e-6)
+
+
+class RouteGeometryTests(TestCase):
+    def test_resample_puts_a_point_every_mile(self):
+        ten_miles_north = 40 + 10 / MILES_PER_DEGREE
+        samples, total = _resample([[-98, 40], [-98, ten_miles_north]], 1)
+        self.assertAlmostEqual(total, 10, places=6)
+        self.assertEqual(len(samples), 11)
+        self.assertAlmostEqual(samples[5][2], 5)
+        self.assertAlmostEqual(samples[-1][0], ten_miles_north)
+
+    def test_resample_needs_two_points(self):
+        self.assertEqual(_resample([[-98, 40]], 1), ([], 0.0))
+
+    def test_simplify_collapses_a_straight_line(self):
+        line = [[-100 + i * 0.01, 40 + i * 0.01] for i in range(101)]
+        self.assertEqual(simplify_line(line), [[-100, 40], [-99, 41]])
+
+    def test_simplify_keeps_a_corner(self):
+        line = [[-100, 40], [-99.5, 40], [-99, 40], [-99, 40.5], [-99, 41]]
+        self.assertEqual(simplify_line(line), [[-100, 40], [-99, 40], [-99, 41]])
+
+    def test_simplify_rounds_a_short_line(self):
+        self.assertEqual(simplify_line([[-98.1234567, 40.7654321]]), [[-98.12346, 40.76543]])
+
+
+class StationMatchTests(TestCase):
+    def test_keeps_a_nearby_station_and_drops_a_far_one(self):
+        near = _station(1, 40.1, -99)  # about 7 miles north of the route
+        twin = _station(2, 40.1, -99)  # same city, so same place
+        far = _station(3, 40.5, -99)  # about 35 miles north
+        found = stations_along_route(
+            StationIndex([near, twin, far]),
+            [[-100, 40], [-98, 40]],
+            106,
+        )
+        self.assertEqual({item["station"].id for item in found}, {1, 2})
+        self.assertAlmostEqual(found[0]["offset_miles"], 0.1 * MILES_PER_DEGREE, delta=0.5)
+        self.assertAlmostEqual(found[0]["mile"], 53, delta=1)
+
+    def test_no_route_finds_nothing(self):
+        self.assertEqual(stations_along_route(StationIndex([_station(1, 40, -99)]), [], 0), [])
+
+    def test_matches_a_brute_force_search(self):
+        rng = random.Random(4)
+        route = [[-100 + i * 0.05, 40 + 0.3 * math.sin(i / 5)] for i in range(80)]
+        stations = [
+            _station(i, rng.uniform(39.3, 40.9), rng.uniform(-100.3, -95.7))
+            for i in range(400)
+        ]
+        found = {
+            item["station"].id: item["offset_miles"]
+            for item in stations_along_route(StationIndex(stations), route, 220)
+        }
+        dense, _total = _resample(route, 0.05)
+        for station in stations:
+            offset = min(
+                haversine(station.latitude, station.longitude, lat, lng)
+                for lat, lng, _mile in dense
+            )
+            if abs(offset - CORRIDOR_MILES) < 0.6:
+                continue  # sampling can tip a station right on the edge either way
+            self.assertEqual(station.id in found, offset < CORRIDOR_MILES, station)
+            if station.id in found:
+                self.assertAlmostEqual(found[station.id], offset, delta=0.6)
+
+
+def _station(station_id, lat, lng, price="3.000"):
+    return SimpleNamespace(id=station_id, latitude=lat, longitude=lng, price=Decimal(price))
 
 
 def _random_stations(rng, dest):

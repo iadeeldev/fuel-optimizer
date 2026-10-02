@@ -7,8 +7,8 @@ from django.core.cache import cache
 
 from .fuel import FuelPlanError, MPG, MAX_RANGE_MILES, plan_fuel
 from .geo import PlaceError, locate_label
-from .routing import CORRIDOR_MILES, RoutingError, driving_route, stations_along_route
-from .stations import all_stations
+from .routing import CORRIDOR_MILES, RoutingError, driving_route, simplify_line, stations_along_route
+from .stations import station_index
 
 PLAN_NAMES = ("cheapest", "fewer_stops")
 DEFAULT_PLAN = "cheapest"
@@ -35,7 +35,7 @@ def build_plan(start_text, finish_text, plan=DEFAULT_PLAN):
 
 def _trip(start_text, finish_text):
     """Everything that does not depend on the chosen plan. Cached, so switching plans is free."""
-    cache_key = f"plan:v4:{_norm(start_text)}|{_norm(finish_text)}"
+    cache_key = f"plan:v5:{_norm(start_text)}|{_norm(finish_text)}"
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
@@ -52,7 +52,7 @@ def _trip(start_text, finish_text):
         raise PlanError(str(exc), status=502) from exc
 
     nearby = stations_along_route(
-        all_stations(),
+        station_index(),
         route["coordinates"],
         route["distance_miles"],
     )
@@ -73,7 +73,8 @@ def _trip(start_text, finish_text):
         "starting_tank_gallons": round(MAX_RANGE_MILES / MPG, 1),
         "plans": plans,
         "plan_comparison": _comparison(plans["cheapest"], plans["fewer_stops"]),
-        "route": {"type": "LineString", "coordinates": route["coordinates"]},
+        # Matching used the full line; the browser only needs its visible shape.
+        "route": {"type": "LineString", "coordinates": simplify_line(route["coordinates"])},
         "notes": (
             "The vehicle starts with a full tank (50 gallons), so that first tank "
             "is not billed and a trip under 500 miles costs nothing. "
