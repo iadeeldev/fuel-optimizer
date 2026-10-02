@@ -1,0 +1,6 @@
+Django==6.1.1
+djangorestframework==3.18.1
+drf-spectacular==0.30.0
+pdfplumber==0.11.10
+python-dotenv==1.2.4
+requests==2.34.2

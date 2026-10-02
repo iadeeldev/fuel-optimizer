@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="origin">
+  <title>Fuel route</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  >
+  <style>
+    :root {
+      --ink: #1c1915;
+      --muted: #5e584f;
+      --line: #e4ddd2;
+      --paper: #f6f3ee;
+      --panel: #fffdf9;
+      --green: #0f6e56;
+      --amber: #b45309;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    .app { display: grid; grid-template-columns: 380px 1fr; height: 100%; }
+    aside {
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      min-height: 0;
+      overflow: auto;
+    }
+    header { padding: 22px 22px 8px; }
+    h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.03em; }
+    p.lead { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+    form { padding: 16px 22px 8px; display: grid; gap: 10px; }
+    label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+    input {
+      font: inherit;
+      font-size: 15px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+      color: var(--ink);
+    }
+    button, .chip {
+      font: inherit;
+      cursor: pointer;
+      border-radius: 8px;
+    }
+    button[type="submit"] {
+      border: 0;
+      background: var(--ink);
+      color: white;
+      padding: 11px 14px;
+      font-weight: 600;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 22px 12px; }
+    .chip {
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 5px 8px;
+    }
+    #summary {
+      overflow: auto;
+      padding: 8px 22px 24px;
+      border-top: 1px solid var(--line);
+      flex: 1;
+    }
+    .stat { font-size: 28px; font-weight: 650; letter-spacing: -0.03em; margin: 8px 0 2px; }
+    .sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+    .error { color: #9f1239; font-size: 14px; line-height: 1.4; }
+    ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+    li {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    li strong { display: block; font-size: 14px; }
+    li span { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+    #map { height: 100%; min-height: 420px; background: #d9e2d4; }
+    .stop-pin {
+      background: var(--amber);
+      color: white;
+      border-radius: 99px;
+      width: 22px;
+      height: 22px;
+      line-height: 22px;
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      border: 2px solid white;
+    }
+    @media (max-width: 640px) {
+      .app { display: block; height: auto; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; }
+      #map { height: 70vh; }
+      #summary { flex: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <header>
+        <h1>Fuel route</h1>
+        <p class="lead">USA driving route, the cheapest places to refuel, and the total fuel bill. Range is 500 miles and the truck gets 10 miles per gallon.</p>
+      </header>
+      <form id="trip">
+        <label>Start
+          <input name="start" value="{{ start }}" required autocomplete="off">
+        </label>
+        <label>Finish
+          <input name="finish" value="{{ finish }}" required autocomplete="off">
+        </label>
+        <button type="submit">Plan route</button>
+      </form>
+      <div class="chips">
+        <button class="chip" type="button" data-start="Chicago, IL" data-finish="Dallas, TX">Chicago to Dallas</button>
+        <button class="chip" type="button" data-start="Seattle, WA" data-finish="Miami, FL">Seattle to Miami</button>
+        <button class="chip" type="button" data-start="New York, NY" data-finish="Los Angeles, CA">New York to Los Angeles</button>
+      </div>
+      <div id="summary"><p class="sub">Plan a trip to see stops and cost.</p></div>
+    </aside>
+    <div id="map"></div>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map("map", { zoomControl: true }).setView([39.5, -96], 4);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      referrerPolicy: "origin",
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+    const drawn = L.layerGroup().addTo(map);
+    const form = document.getElementById("trip");
+    const summary = document.getElementById("summary");
+
+    function dollars(value) {
+      return "$" + Number(value).toFixed(2);
+    }
+    function perGallon(value) {
+      return "$" + Number(value).toFixed(3);
+    }
+
+    function render(data) {
+      drawn.clearLayers();
+      const line = L.geoJSON(data.route, {
+        style: { color: "#0f6e56", weight: 5, opacity: 0.9 }
+      }).addTo(drawn);
+      L.circleMarker([data.start.lat, data.start.lng], {
+        radius: 7, color: "#1c1915", fillColor: "#1c1915", fillOpacity: 1
+      }).addTo(drawn).bindTooltip("Start: " + data.start.label);
+      L.circleMarker([data.finish.lat, data.finish.lng], {
+        radius: 7, color: "#0f6e56", fillColor: "#0f6e56", fillOpacity: 1
+      }).addTo(drawn).bindTooltip("Finish: " + data.finish.label);
+      data.fuel_stops.forEach((stop, index) => {
+        const icon = L.divIcon({
+          className: "",
+          html: '<div class="stop-pin">' + (index + 1) + "</div>",
+          iconSize: [22, 22],
+          iconAnchor: [11, 11]
+        });
+        L.marker([stop.lat, stop.lng], { icon }).addTo(drawn).bindPopup(
+          "<strong>" + stop.name + "</strong><br>" +
+          stop.city + ", " + stop.state + "<br>" +
+          perGallon(stop.price_per_gallon) + "/gal · " +
+          stop.gallons + " gal · " + dollars(stop.cost_usd)
+        );
+      });
+      if (line.getBounds().isValid()) {
+        map.fitBounds(line.getBounds(), { padding: [28, 28] });
+      }
+      const stops = data.fuel_stops.length
+        ? "<ol>" + data.fuel_stops.map((stop) =>
+            "<li><strong>" + stop.city + ", " + stop.state + "</strong>" +
+            "<span>" + stop.name + " · mile " + stop.mile_along_route +
+            " · " + stop.gallons + " gal at " + perGallon(stop.price_per_gallon) +
+            " · " + dollars(stop.cost_usd) + "</span></li>"
+          ).join("") + "</ol>"
+        : "<p class=\"sub\">No fuel stop. A full tank covers this trip.</p>";
+      summary.innerHTML =
+        '<div class="stat">' + dollars(data.total_fuel_cost_usd) + "</div>" +
+        '<p class="sub">' + data.distance_miles + " miles · " +
+        Math.round(data.duration_minutes) + " min · " +
+        data.fuel_stops.length + " stop" + (data.fuel_stops.length === 1 ? "" : "s") +
+        "</p>" + stops;
+    }
+
+    async function plan() {
+      const start = form.start.value.trim();
+      const finish = form.finish.value.trim();
+      summary.innerHTML = '<p class="sub">Planning…</p>';
+      const params = new URLSearchParams({ start, finish });
+      const response = await fetch("/api/route/?" + params.toString());
+      const data = await response.json();
+      if (!response.ok) {
+        drawn.clearLayers();
+        summary.innerHTML = '<p class="error">' + (data.error || "Could not plan that route.") + "</p>";
+        return;
+      }
+      const url = new URL(window.location.href);
+      url.searchParams.set("start", start);
+      url.searchParams.set("finish", finish);
+      history.replaceState(null, "", url);
+      render(data);
+    }
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      plan();
+    });
+    document.querySelectorAll(".chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        form.start.value = chip.dataset.start;
+        form.finish.value = chip.dataset.finish;
+        plan();
+      });
+    });
+    plan();
+  </script>
+</body>
+</html>
