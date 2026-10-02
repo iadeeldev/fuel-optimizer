@@ -78,3 +78,7 @@ class RoutePlanSerializer(serializers.Serializer):
 
 class ErrorSerializer(serializers.Serializer):
     error = serializers.CharField()
+
+
+class ThrottledSerializer(serializers.Serializer):
+    detail = serializers.CharField(help_text="For example: Request was throttled. Expected available in 42 seconds.")

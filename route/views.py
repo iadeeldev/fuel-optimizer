@@ -4,12 +4,12 @@ from django.shortcuts import render
 from django.urls import reverse
 from django.views.decorators.gzip import gzip_page
 from django.views.decorators.http import require_GET
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.utils import OpenApiExample, OpenApiParameter, OpenApiResponse, extend_schema
 from rest_framework.decorators import api_view, throttle_classes
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 
-from .serializers import ErrorSerializer, RoutePlanSerializer
+from .serializers import ErrorSerializer, RoutePlanSerializer, ThrottledSerializer
 from .services.planner import DEFAULT_PLAN, PLAN_NAMES, PlanError, build_plan
 
 
@@ -20,6 +20,7 @@ class RouteRateThrottle(AnonRateThrottle):
 
 
 @extend_schema(
+    tags=["Route planning"],
     summary="Plan a driving route and the cheapest fuel stops",
     description=(
         "Takes a start and finish inside the USA. Returns the driving route, "
@@ -33,6 +34,8 @@ class RouteRateThrottle(AnonRateThrottle):
             location=OpenApiParameter.QUERY,
             required=True,
             description="Start place. A US city, with or without a state. Example: Chicago, IL",
+            # Swagger's "Try it out" fills the box with the first example.
+            examples=[OpenApiExample("New York", value="New York, NY")],
         ),
         OpenApiParameter(
             name="finish",
@@ -40,6 +43,7 @@ class RouteRateThrottle(AnonRateThrottle):
             location=OpenApiParameter.QUERY,
             required=True,
             description="Finish place. A US city, with or without a state. Example: Dallas, TX",
+            examples=[OpenApiExample("Los Angeles", value="Los Angeles, CA")],
         ),
         OpenApiParameter(
             name="plan",
@@ -56,10 +60,14 @@ class RouteRateThrottle(AnonRateThrottle):
         ),
     ],
     responses={
-        200: RoutePlanSerializer,
-        400: ErrorSerializer,
-        429: None,
-        502: ErrorSerializer,
+        200: OpenApiResponse(RoutePlanSerializer, description="Route, both fuel plans and their costs."),
+        400: OpenApiResponse(
+            ErrorSerializer,
+            description="Bad input: a place outside the USA or not found, an unknown plan, "
+            "no road between the places, or a gap of more than 500 miles without a station.",
+        ),
+        429: OpenApiResponse(ThrottledSerializer, description="Too many requests from this client. Retry later."),
+        502: OpenApiResponse(ErrorSerializer, description="The routing service (OSRM) did not respond."),
     },
 )
 # Compressed here rather than site-wide: this reply holds no secrets, while

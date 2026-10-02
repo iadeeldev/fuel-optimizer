@@ -132,6 +132,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # The API is public: no login, so Swagger shows no Authorize button or locks.
+    'DEFAULT_AUTHENTICATION_CLASSES': [],
+    'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny'],
     # Per-client limit on the route endpoint. The free OSRM server asks for
     # about one request a second, and cached trips do not call it at all.
     'DEFAULT_THROTTLE_RATES': {
@@ -147,6 +150,14 @@ SPECTACULAR_SETTINGS = {
         'and fuel economy is 10 miles per gallon.'
     ),
     'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    # Keep start, finish, plan in the order a person fills them in.
+    'SORT_OPERATION_PARAMETERS': False,
+    'SWAGGER_UI_SETTINGS': {
+        'deepLinking': True,
+        'tryItOutEnabled': True,
+        'displayRequestDuration': True,
+    },
 }
 
 # Dollars charged per fuel stop when planning the fewer_stops option. It stands
